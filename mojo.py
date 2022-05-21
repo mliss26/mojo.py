@@ -90,21 +90,23 @@ def main():
         install_mojo(ser, args.install, args.verbose, args.no_verify, args.ram, args.progress)
         sys.exit(0)
 
-def display_progress(p, width=30):
+def display_progress(p, prefix='', width=40):
     if p > 1:
         p = 1
     if p < 0:
         p = 0
     bar_width = int(width * p)
     rem_bar_width = int(width - bar_width)
-    sys.stdout.write("\r[" + ("#" * bar_width) + (" " * rem_bar_width) +
+    arrow = '>' if p < 1 else '='
+    sys.stdout.write("\r" + prefix + "[" + ("=" * (bar_width-1)) + arrow + (" " * rem_bar_width) +
                      ("] (%d%%)" % int(100 * p)))
     sys.stdout.flush()
 
 def install_mojo(ser, bitstream, verbose, no_verify, ram, progress):
+    CHUNK_SIZE = 4096
     file = open(bitstream, 'rb')
-    bits = file.read()
-    length = len(bits)
+    bitstream = file.read()
+    length = len(bitstream)
     reboot_mojo(ser, verbose)
 
     if ram:
@@ -137,22 +139,31 @@ def install_mojo(ser, bitstream, verbose, no_verify, ram, progress):
     buffer = struct.unpack("4B", struct.pack("I", length))
     ser.write(buffer)
     ret = ser.read(1)
-    if verbose and  ret == b'O':
-        print('Mojo acknowledged size of bitstream. Writing bitstream')
+    if verbose and ret == b'O':
+        print('Mojo acknowledged size of bitstream.')
     elif ret != b'O':
         print('Mojo failed to acknowledge size of bitstream. Did not write', ret)
         sys.exit(1)
 
     if progress:
-        for i,bit in enumerate(bits):
-            ser.write(bit)
-            display_progress(float(i + 1)/length)
+        sent_len = 0
+        bits = bitstream
+        while len(bits) > 0:
+            chunk_len = CHUNK_SIZE if (len(bits) >= CHUNK_SIZE) else len(bits)
+            chunk = bits[0:chunk_len]
+            bits = bits[chunk_len:]
+            write_len = ser.write(chunk)
+            if (write_len != chunk_len):
+                print('Failed to write complete chunk: ({}/{})'.format(write/chunk_len))
+            sent_len += chunk_len
+            display_progress(float(sent_len)/length, prefix='  Writing Bitstream ')
         sys.stdout.write('\n')
     else:
-        ser.write(bits)
+        print('Writing Bitstream...')
+        ser.write(bitstream)
 
     ret = ser.read(1)
-    if verbose and  ret == b'D':
+    if verbose and ret == b'D':
         print('Mojo has been flashed')
     elif ret != b'D':
         print('Mojo failed to flash correctly', ret)
@@ -163,22 +174,37 @@ def install_mojo(ser, bitstream, verbose, no_verify, ram, progress):
         if verbose:
             print('Verifying Mojo')
         ret = ser.read(1)
-        if  ret == b'\xAA' and verbose:
+        if ret == b'\xAA' and verbose:
             print('First Byte was valid getting flash size.')
         elif ret != b'\xAA':
             print('Flash does not contain valid start byte.', ret)
             sys.exit(1)
         ret = ser.read(4)
         flash_length = struct.unpack("I", ret)[0] - 5
-        if  flash_length == length and verbose:
+        if flash_length == length and verbose:
             print('Flash and local bitstream match file size.')
         elif flash_length != length:
             print('Flash is not same size as local bitstream.')
             sys.exit(1)
-        ret = ser.read(length)
-        if  ret == bits  and verbose:
+
+        if progress:
+            recv_len = 0
+            ret = b''
+            while recv_len < length:
+                chunk_len = CHUNK_SIZE if ((length - recv_len) >= CHUNK_SIZE) else (length - recv_len)
+                chunk = ser.read(chunk_len)
+                ret += chunk
+                recv_len += len(chunk)
+                display_progress(float(recv_len)/length, prefix='Verifying Bitstream ')
+            sys.stdout.write('\n')
+        else:
+            print('Verifying Bitstream...')
+            ret = ser.read(length)
+
+        valid = (ret == bitstream)
+        if valid and verbose:
             print('Flash and local bitstream are a match.')
-        elif ret != bits:
+        elif not valid:
             print('Flash and local bitstream do not match.')
             with (open('verify_failure.bin', 'wb') as of):
                 of.write(ret)
